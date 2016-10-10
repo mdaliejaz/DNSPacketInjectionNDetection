@@ -1,0 +1,282 @@
+CSE508: Network Security, Spring 2016
+
+Homework 4: DNS Packet Injection
+-------------------------------------------------------------------------------
+
+1) an on-path DNS packet injector and
+2) a passive DNS poisoning attack detector
+has been developed in this assignment.
+
+
+Part 1: DNS packet injector
+============================
+
+The DNS packet injector named 'dnsinject', captures the traffic from a network
+interface in promiscuous mode, and attempts to inject forged responses to 
+selected DNS type A requests.
+
+The program conforms to the following specification:
+
+dnsinject [-i interface] [-f hostnames] expression
+
+-i  Listen on network device <interface> (e.g., eth0). If not specified,
+    dnsinject selects a default interface to listen on. The same
+    interface is used for packet injection.
+
+-f  Read a list of IP address and hostname pairs specifying the hostnames to
+    be hijacked. If '-f' is not specified, dnsinject forges replies for
+    all observed requests with the local machine's IP address as an answer.
+    
+<expression> is a BPF filter that allows to specify a subset of the traffic
+to be monitored. This option is useful for targeting a single or a set of
+particular victims.
+
+The <hostnames> file contains one IP and hostname pair per line,
+separated by whitespace. For example:
+10.6.6.6      foo.example.com
+10.6.6.6      bar.example.com
+192.168.66.6  www.cs.stonybrook.edu
+
+The spoofed response is generated in short enough time to spoof almost all
+requests. I've tried with many top sites like www.facebook.com,
+www.instagram.com, www.gmail.com, www.netflix.com, etc. and have got my
+spoofed response as reply for the nslookup query. A sample reply is shown:
+
+-----------------------
+ali@ubuntu:/mnt/hgfs/hw4$ nslookup www.instagram.com
+Server:		127.0.1.1
+Address:	127.0.1.1#53
+
+Non-authoritative answer:
+Name:	www.instagram.com
+Address: 172.16.67.129
+-----------------------
+
+where 172.16.67.129 is the IP of the attacker in this case.
+
+If a file is specified with -f option, spoof DNS replies are sent only for 
+the listed websites in the file. The spoof reply contains the corresponding
+IP specified in the file. If the domain is not listed, the attacker is
+notified of the requested domain and informed that it's not being spoofed.
+This will help decide the attacker while editing the file in furture :P
+The hostnames file used below is same as in the example above.
+
+-----------------------
+ali@ubuntu:/mnt/hgfs/hw4$ sudo ./dnsinject -f hostnames 
+[sudo] password for ali: 
+Listening on device: ens33
+
+Not Spoofing www.instagram.com requested from 172.16.67.131 as it's not listed in file.
+Spoofed www.cs.stonybrook.edu requested from 172.16.67.131
+
+# with specified interface
+ali@ubuntu:/mnt/hgfs/hw4$ sudo ./dnsinject -i ens33 -f hostnames 
+Listening on device: ens33
+
+Not Spoofing www.gmail.com requested from 172.16.67.129 as it's not listed in file.
+Spoofed www.cs.stonybrook.edu requested from 172.16.67.131
+-----------------------
+
+If the command is ran without any option, all the requests are spoofed, and
+the atacker is notified of the requests that are spoofed as shown below. Note,
+however, not a lot of information is printed in order to make the code
+time efficient.
+
+-----------------------
+ali@ubuntu:/mnt/hgfs/hw4$ sudo ./dnsinject 
+[sudo] password for ali: 
+Listening on device: ens33
+
+Spoofed www.cs.stonybrook.edu requested from 172.16.67.129
+Spoofed www.facebook.com requested from 172.16.67.131
+Spoofed www.netflix.com requested from 172.16.67.129
+-----------------------
+
+Users can specify expression to attack particular IP like the one shown below.
+This expression in the below example ensures that only the DNS queries from
+172.16.67.131 are spoofed. A request from any other IP would not be spoofed.
+
+-----------------------
+ali@ubuntu:/mnt/hgfs/hw4$ sudo ./dnsinject -i ens33 "ip src 172.16.67.131"
+Listening on device: ens33
+
+Spoofed www.twitter.com requested from 172.16.67.131
+Spoofed www.google.com requested from 172.16.67.131
+-----------------------
+
+One thing to note however, is the keyword 'spoof_all' used in the code. To
+find the IP of the attacker, I needed the device name to pass to IOCTL.
+Instead of passing device name and call IOCTL to get IP of the machine I
+chose to find the IP in the main section, before any packet is received and
+pass the IP of the attacker machine as parameter. This saves time for 
+evaluation. However, this parameter is same as the one used to pass the map 
+read from the file option. 
+As such this flag 'spoof_all' is used to differentiate the cases where the
+parameter is coming from the file map or not. This leads to a potential flaw.
+If the file contains this keyword as the first mapping (I don't know why
+would anyone provide that in the first place, but nontheless), all the domains
+will be spoofed ignoring the file content. But since this file and the code is
+handled by the attacker hislef/herslef, this shouldn't be a problem :)
+
+
+
+Part 2: DNS poisoning attack detector
+======================================
+
+The DNS poisoning attack detector named 'dnsdetect', captures the traffic
+from a network interface in promiscuous mode and detects DNS poisoning attack
+attempts, such as those generated by dnsinject. Detection is based on
+identifying duplicate responses towards the same destination that contains
+different answers for the same - type A request, i.e., the observation of
+the attacker's spoofed response followed by the server's actual response.
+Every effort is made to avoid false positives, e.g., due to legitimate
+consecutive responses with different IP addresses for the same hostname
+due to round robin DNS load balancing as seen in the response of
+www.netflix.com for instance.
+
+The program conforms to the following specification:
+
+dnsdetect [-i interface] [-r tracefile] expression
+
+-i  Listen on network device <interface> (e.g., eth0). If not specified,
+    the program selects a default interface to listen on.
+
+-r  Read packets from <tracefile> (tcpdump format). Useful for detecting
+    DNS poisoning attacks in existing network traces.
+
+<expression> is a BPF filter that allows to specify a subset of the
+traffic to be monitored.
+
+Once an attack is detected, dnsdetect prints to stdout a detailed alert
+containing a printout of both the spoofed and legitimate responses. Output
+contains the detected DNS transaction ID, attacked domain name, and the
+original and malicious IP addresses - for example:
+
+-----------------------
+DNS poisoning attempt detected!!!
+Timestamp: Sun May  8 22:07:50 2016
+TXID: 0x808	Request: www.google.com
+Answer1 [172.16.67.129]
+Answer2 [216.58.219.228]
+-----------------------
+
+
+If interface is not provided the program chooses the default interface as
+shown below:
+
+-----------------------
+ali@ubuntu:/mnt/hgfs/hw4$ sudo ./dnsdetect 
+Listening on device: ens33
+
+
+DNS poisoning attempt detected!!!
+Timestamp: Sun May  8 22:07:53 2016
+TXID: 0x9684	Request: www.twitter.com
+Answer1 [172.16.67.129]
+Answer2 [199.16.156.70, 199.16.156.102, 199.16.156.198, 199.16.156.230]
+
+DNS poisoning attempt detected!!!
+Timestamp: Sun May  8 22:07:56 2016
+TXID: 0x6560	Request: www.netflix.com
+Answer1 [172.16.67.129]
+Answer2 [54.225.190.75, 54.225.137.148, 54.204.30.249, 50.19.231.27, 54.225.189.147, 50.19.95.183, 54.225.189.216, 54.225.120.5]
+
+
+# with interface provided
+ali@ubuntu:/mnt/hgfs/hw4$ sudo ./dnsdetect -i ens33
+Listening on device: ens33
+
+
+DNS poisoning attempt detected!!!
+Timestamp: Sun May  8 22:18:44 2016
+TXID: 0x115d	Request: www.netflix.com
+Answer1 [172.16.67.129]
+Answer2 [23.23.233.52, 23.23.122.209, 23.23.160.20, 23.23.107.38, 23.23.99.248, 23.23.102.251, 23.23.146.124, 23.23.142.225]
+
+-----------------------
+
+
+Attached is the trace file named my_trace.pcap which if read by dnsdetect
+gives the following output:
+
+-----------------------
+ali@ubuntu:/mnt/hgfs/hw4$ sudo ./dnsdetect -r my_trace.pcap 
+Opened file my_trace.pcap
+
+
+DNS poisoning attempt detected!!!
+Timestamp: Sun May  8 22:30:51 2016
+TXID: 0x54b	Request: www.google.com
+Answer1 [172.16.67.129]
+Answer2 [216.58.219.228]
+
+DNS poisoning attempt detected!!!
+Timestamp: Sun May  8 22:30:52 2016
+TXID: 0x2ee6	Request: www.netflix.com
+Answer1 [172.16.67.129]
+Answer2 [23.21.110.135, 23.21.97.34, 23.21.80.150, 184.73.173.66, 184.73.233.142, 23.23.102.251, 23.21.88.183, 23.21.222.0]
+
+DNS poisoning attempt detected!!!
+Timestamp: Sun May  8 22:30:58 2016
+TXID: 0x24c0	Request: www.twitter.com
+Answer1 [172.16.67.129]
+Answer2 [199.16.156.70, 199.16.156.38, 199.16.156.230, 199.16.156.102]
+
+DNS poisoning attempt detected!!!
+Timestamp: Sun May  8 22:31:21 2016
+TXID: 0x66c6	Request: www.facebook.com
+Answer1 [172.16.67.129]
+Answer2 [31.13.80.36]
+
+DNS poisoning attempt detected!!!
+Timestamp: Sun May  8 22:31:23 2016
+TXID: 0xbcc4	Request: www.twitter.com
+Answer1 [172.16.67.129]
+Answer2 [199.16.156.38, 199.16.156.198, 199.16.156.102, 199.16.156.6]
+-----------------------
+
+A valid expression can be provided to filter further.
+
+The code uses a database to store previously seen transaction IDs. This
+is a static database of fixed size of 1000. I was planning to make it dynamic
+in nature so that old data can be removed. But due to shortage of time, I
+couldn't get to finish that. Even with the current size of 1000, the
+program should work efficiently as the database stores only the DNS replies.
+
+
+
+Files:
+=======
+dnsinject.c 	for part 1
+dnsdetect.c 	for part 2
+Makefile		To generate binaries for part 1 and part 2
+my_trace.pcap	Sample trace file generated with attack through dnsinject.
+				Used to test dnsdetect with file.
+
+
+
+To generate executables:
+========================
+make 		- generates the executables
+make clean	- deletes the generated executables
+
+
+
+Test Setup:
+============
+I used VMware Fusion to set up two ubuntu 16.04 LTS virtual machines
+behind the same NAT. This setup comes out of the box and no extra network
+configuration is required unlike in the Oracle VirtualBox.
+
+
+
+References:
+============
+1. Part of the code has been used from HW2 submission.
+2. http://www.ccs.neu.edu/home/amislove/teaching/cs4700/fall09/handouts/project1-primer.pdf
+3. http://www.microhowto.info/howto/get_the_ip_address_of_a_network_interface_in_c_using_siocgifaddr.html
+4. http://web.eecs.utk.edu/~cs594np/unp/checksum.html
+5. http://www.binarytides.com/raw-sockets-c-code-linux/
+6. http://www.binarytides.com/raw-sockets-c-code-linux/
+7. http://www.tcpdump.org/pcap.html
+
